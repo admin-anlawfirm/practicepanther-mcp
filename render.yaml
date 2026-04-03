@@ -1,8 +1,10 @@
 services:
   - type: web
     name: practicepanther-mcp
-    runtime: docker
+    runtime: python
     plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
     envVars:
       - key: PP_CLIENT_ID
         sync: false
@@ -10,3 +12,5 @@ services:
         sync: false
       - key: PP_REDIRECT_URI
         sync: false
+      - key: PYTHON_VERSION
+        value: "3.12.0"
