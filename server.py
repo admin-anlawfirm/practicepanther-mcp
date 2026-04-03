@@ -1053,12 +1053,23 @@ async def health(request: Request):
 
 def create_app():
     """Create the Starlette app wrapping the MCP server."""
+    mcp_app = mcp.streamable_http_app()
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lifespan(app):
+        # Run the MCP app's lifespan so the task group is initialized
+        async with mcp_app.router.lifespan_context(app):
+            yield
+
     app = Starlette(
         routes=[
             Route("/oauth/callback", oauth_callback),
             Route("/health", health),
-            Mount("/", app=mcp.streamable_http_app()),
+            Mount("/mcp", app=mcp_app),
         ],
+        lifespan=lifespan,
     )
     return app
 
