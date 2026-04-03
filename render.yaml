@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: practicepanther-mcp
+    runtime: docker
+    plan: free
+    envVars:
+      - key: PP_CLIENT_ID
+        sync: false
+      - key: PP_CLIENT_SECRET
+        sync: false
+      - key: PP_REDIRECT_URI
+        sync: false
