@@ -1067,7 +1067,7 @@ def create_app():
         routes=[
             Route("/oauth/callback", oauth_callback),
             Route("/health", health),
-            Mount("/mcp", app=mcp_app),
+            Mount("/", app=mcp_app),
         ],
         lifespan=lifespan,
     )
