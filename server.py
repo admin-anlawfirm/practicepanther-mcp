@@ -7,6 +7,7 @@ import os
 from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
@@ -25,6 +26,10 @@ mcp = FastMCP(
         "MCP server for PracticePanther legal practice management. "
         "Call get_auth_url first to authenticate, then use any tool. "
         "All IDs are UUIDs. Dates are ISO 8601 UTC."
+    ),
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=["practicepanther-mcp.onrender.com", "localhost", "127.0.0.1"],
     ),
 )
 
