@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from typing import Any
@@ -11,26 +12,79 @@ import httpx
 BASE_URL = "https://app.practicepanther.com"
 API_V2 = f"{BASE_URL}/api/v2"
 
+# ---------------------------------------------------------------------------
+# Redis-backed token persistence
+# ---------------------------------------------------------------------------
+
+_redis_client = None
+REDIS_KEY = "pp_oauth_tokens"
+
+
+def _get_redis():
+    global _redis_client
+    if _redis_client is None:
+        redis_url = os.environ.get("REDIS_URL")
+        if redis_url:
+            import redis
+            _redis_client = redis.from_url(redis_url, decode_responses=True)
+    return _redis_client
+
+
+def _save_tokens_to_redis(access_token: str, refresh_token: str, expires_at: float) -> None:
+    r = _get_redis()
+    if r:
+        r.set(REDIS_KEY, json.dumps({
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "expires_at": expires_at,
+        }))
+
+
+def _load_tokens_from_redis() -> dict | None:
+    r = _get_redis()
+    if r:
+        data = r.get(REDIS_KEY)
+        if data:
+            return json.loads(data)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Token store
+# ---------------------------------------------------------------------------
 
 class TokenStore:
-    """In-memory OAuth token storage with expiry tracking."""
+    """OAuth token storage with Redis persistence."""
 
     def __init__(self) -> None:
         self.access_token: str | None = None
         self.refresh_token: str | None = None
         self.expires_at: float = 0
+        self._loaded = False
+
+    def _ensure_loaded(self) -> None:
+        if not self._loaded:
+            self._loaded = True
+            saved = _load_tokens_from_redis()
+            if saved:
+                self.access_token = saved["access_token"]
+                self.refresh_token = saved["refresh_token"]
+                self.expires_at = saved["expires_at"]
 
     def set_tokens(self, access_token: str, refresh_token: str, expires_in: int) -> None:
         self.access_token = access_token
         self.refresh_token = refresh_token
         self.expires_at = time.time() + expires_in - 60  # 60s buffer
+        _save_tokens_to_redis(access_token, refresh_token, self.expires_at)
 
     @property
     def is_expired(self) -> bool:
+        self._ensure_loaded()
         return time.time() >= self.expires_at
 
     @property
     def is_authenticated(self) -> bool:
+        self._ensure_loaded()
         return self.access_token is not None
 
 
