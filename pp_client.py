@@ -101,7 +101,14 @@ async def api_request(
             files=files,
             headers=headers,
         )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            try:
+                error_body = resp.text
+            except Exception:
+                error_body = ""
+            raise RuntimeError(
+                f"PP API {method} /{path} returned {resp.status_code}: {error_body}"
+            )
 
         if is_download:
             return {"content": resp.content.hex(), "content_type": resp.headers.get("content-type")}
