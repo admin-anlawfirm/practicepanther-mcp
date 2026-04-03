@@ -9,9 +9,11 @@ from typing import Any, Optional
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from oauth import exchange_code_for_tokens, get_authorize_url
 from pp_client import api_delete, api_get, api_post, api_put, api_request
@@ -1026,6 +1028,36 @@ async def list_users() -> Any:
 
 
 # ===========================================================================
+# Security Middleware
+# ===========================================================================
+
+ALLOWED_EMAIL_DOMAIN = "anlawfirm.com"
+
+
+class BearerTokenMiddleware:
+    """Require a bearer token on /mcp routes. Open routes (/health, /oauth/callback) are exempt."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+        self.token = os.environ.get("MCP_AUTH_TOKEN", "")
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope["path"].startswith("/mcp"):
+            if not self.token:
+                # No token configured = server misconfigured, reject all
+                response = PlainTextResponse("Server auth not configured", status_code=503)
+                await response(scope, receive, send)
+                return
+            headers = dict(scope.get("headers", []))
+            auth = headers.get(b"authorization", b"").decode()
+            if auth != f"Bearer {self.token}":
+                response = PlainTextResponse("Unauthorized", status_code=401)
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+# ===========================================================================
 # Starlette App (HTTP wrapper with OAuth callback)
 # ===========================================================================
 
@@ -1043,6 +1075,26 @@ async def oauth_callback(request: Request):
 
     try:
         result = await exchange_code_for_tokens(code)
+
+        # Verify the authenticated user belongs to the allowed domain
+        from pp_client import token_store
+        try:
+            user = await api_get("users/me")
+            email = (user.get("email") or "").lower()
+            if not email.endswith(f"@{ALLOWED_EMAIL_DOMAIN}"):
+                # Clear tokens — unauthorized domain
+                token_store.access_token = None
+                token_store.refresh_token = None
+                token_store.expires_at = 0
+                return HTMLResponse(
+                    f"<h1>Access Denied</h1>"
+                    f"<p>Only @{ALLOWED_EMAIL_DOMAIN} users are authorized. "
+                    f"Your email ({email}) is not permitted.</p>",
+                    status_code=403,
+                )
+        except Exception:
+            pass  # If user check fails, allow — token already stored
+
         return HTMLResponse(
             "<h1>PracticePanther Connected!</h1>"
             "<p>You can close this window and return to Claude.</p>"
@@ -1075,6 +1127,7 @@ def create_app():
             Mount("/", app=mcp_app),
         ],
         lifespan=lifespan,
+        middleware=[Middleware(BearerTokenMiddleware)],
     )
     return app
 
