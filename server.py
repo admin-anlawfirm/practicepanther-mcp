@@ -1056,22 +1056,32 @@ ALLOWED_EMAIL_DOMAIN = "anlawfirm.com"
 
 
 class BearerTokenMiddleware:
-    """Require a bearer token on /mcp routes. Open routes (/health, /oauth/callback) are exempt."""
+    """Require a bearer token on /mcp routes. Open routes (/health, /oauth/callback) are exempt.
+
+    Accepts any of the following as a valid bearer token:
+      - MCP_AUTH_TOKEN (static token)
+      - PP_CLIENT_SECRET (PracticePanther client secret)
+    This allows the Claude connector to authenticate using the PP client secret directly.
+    """
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
-        self.token = os.environ.get("MCP_AUTH_TOKEN", "")
+        self.valid_tokens: set[str] = set()
+        for var in ("MCP_AUTH_TOKEN", "PP_CLIENT_SECRET"):
+            val = os.environ.get(var, "").strip()
+            if val:
+                self.valid_tokens.add(val)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http" and scope["path"].startswith("/mcp"):
-            if not self.token:
-                # No token configured = server misconfigured, reject all
+            if not self.valid_tokens:
                 response = PlainTextResponse("Server auth not configured", status_code=503)
                 await response(scope, receive, send)
                 return
             headers = dict(scope.get("headers", []))
             auth = headers.get(b"authorization", b"").decode()
-            if auth != f"Bearer {self.token}":
+            token = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
+            if token not in self.valid_tokens:
                 response = PlainTextResponse("Unauthorized", status_code=401)
                 await response(scope, receive, send)
                 return
