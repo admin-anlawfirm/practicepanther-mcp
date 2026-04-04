@@ -251,7 +251,8 @@ async def delete_matter(id: str) -> Any:
 async def list_time_entries(
     account_id: Optional[str] = None,
     matter_id: Optional[str] = None,
-    billed_by_user_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    item_id: Optional[str] = None,
     created_since: Optional[str] = None,
     updated_since: Optional[str] = None,
     date_from: Optional[str] = None,
@@ -261,12 +262,12 @@ async def list_time_entries(
     odata_filter: Optional[str] = None,
     orderby: Optional[str] = None,
 ) -> Any:
-    """List PracticePanther time entries. Filter by account, matter, user, and date range.
+    """List PracticePanther time entries. Filter by account, matter, user, billing rate item, and date range.
 
     Supports OData: top/skip for pagination, odata_filter for expressions like "contains(user/name, 'john')", orderby like "date desc"."""
     params = build_odata_params(
         top=top, skip=skip, odata_filter=odata_filter, orderby=orderby,
-        account_id=account_id, matter_id=matter_id, billed_by_user_id=billed_by_user_id,
+        account_id=account_id, matter_id=matter_id, user_id=user_id, item_id=item_id,
         created_since=created_since, updated_since=updated_since,
         date_from=date_from, date_to=date_to,
     )
@@ -413,6 +414,8 @@ async def list_flat_fees(
     matter_id: Optional[str] = None,
     user_id: Optional[str] = None,
     item_id: Optional[str] = None,
+    created_since: Optional[str] = None,
+    updated_since: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     top: Optional[int] = None,
@@ -426,7 +429,8 @@ async def list_flat_fees(
     params = build_odata_params(
         top=top, skip=skip, odata_filter=odata_filter, orderby=orderby,
         account_id=account_id, matter_id=matter_id, user_id=user_id,
-        item_id=item_id, date_from=date_from, date_to=date_to,
+        item_id=item_id, created_since=created_since, updated_since=updated_since,
+        date_from=date_from, date_to=date_to,
     )
     return await api_request("GET", "flatfees", params=params or None)
 
@@ -506,20 +510,27 @@ async def delete_invoice(id: str) -> Any:
 async def list_payments(
     account_id: Optional[str] = None,
     matter_id: Optional[str] = None,
+    bank_account_id: Optional[str] = None,
+    bank_account_type: Optional[str] = None,
     created_since: Optional[str] = None,
     updated_since: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     top: Optional[int] = None,
     skip: Optional[int] = None,
     odata_filter: Optional[str] = None,
     orderby: Optional[str] = None,
 ) -> Any:
-    """List PracticePanther payments.
+    """List PracticePanther payments. Filter by account, matter, bank account, and date range.
 
+    bank_account_type: Operating, Trust, or CreditCard.
     Supports OData: top/skip for pagination, odata_filter for OData expressions, orderby for sorting."""
     params = build_odata_params(
         top=top, skip=skip, odata_filter=odata_filter, orderby=orderby,
         account_id=account_id, matter_id=matter_id,
+        bank_account_id=bank_account_id, bank_account_type=bank_account_type,
         created_since=created_since, updated_since=updated_since,
+        date_from=date_from, date_to=date_to,
     )
     return await api_request("GET", "payments", params=params or None)
 
@@ -1018,8 +1029,9 @@ async def delete_bank_account(id: str) -> Any:
 
 @mcp.tool()
 async def list_relationships(
-    account_id: Optional[str] = None,
+    contact_id: Optional[str] = None,
     matter_id: Optional[str] = None,
+    account_id: Optional[str] = None,
     created_since: Optional[str] = None,
     updated_since: Optional[str] = None,
     top: Optional[int] = None,
@@ -1027,12 +1039,12 @@ async def list_relationships(
     odata_filter: Optional[str] = None,
     orderby: Optional[str] = None,
 ) -> Any:
-    """List PracticePanther relationships.
+    """List PracticePanther relationships. Filter by contact, matter, or account.
 
     Supports OData: top/skip for pagination, odata_filter for OData expressions, orderby for sorting."""
     params = build_odata_params(
         top=top, skip=skip, odata_filter=odata_filter, orderby=orderby,
-        account_id=account_id, matter_id=matter_id,
+        contact_id=contact_id, matter_id=matter_id, account_id=account_id,
         created_since=created_since, updated_since=updated_since,
     )
     return await api_request("GET", "relationships", params=params or None)
@@ -1141,9 +1153,17 @@ async def get_user(id: str) -> Any:
 
 
 @mcp.tool()
-async def list_users() -> Any:
-    """List all PracticePanther users."""
-    return await api_get("users")
+async def list_users(
+    created_since: Optional[str] = None,
+    updated_since: Optional[str] = None,
+    email_address: Optional[str] = None,
+) -> Any:
+    """List all PracticePanther users. Filter by creation/update dates or email address."""
+    params = build_odata_params(
+        created_since=created_since, updated_since=updated_since,
+        email_address=email_address,
+    )
+    return await api_request("GET", "users", params=params or None)
 
 
 # ===========================================================================
