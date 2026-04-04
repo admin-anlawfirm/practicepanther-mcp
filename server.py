@@ -596,9 +596,11 @@ async def list_notes(
     matter_id: Optional[str] = None,
     created_since: Optional[str] = None,
     updated_since: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     activity_tag: Optional[str] = None,
 ) -> Any:
-    """List PracticePanther notes."""
+    """List PracticePanther notes. Filter by assignment, account, matter, creation dates, date range, or activity tag."""
     return await api_get(
         "notes",
         assigned_to_user_id=assigned_to_user_id,
@@ -606,6 +608,8 @@ async def list_notes(
         matter_id=matter_id,
         created_since=created_since,
         updated_since=updated_since,
+        date_from=date_from,
+        date_to=date_to,
         activity_tag=activity_tag,
     )
 
@@ -736,8 +740,11 @@ async def list_tasks(
     matter_id: Optional[str] = None,
     created_since: Optional[str] = None,
     updated_since: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    activity_tag: Optional[str] = None,
 ) -> Any:
-    """List PracticePanther tasks."""
+    """List PracticePanther tasks. Filter by assignment, account, matter, creation dates, due date range (date_from/date_to), or activity tag."""
     return await api_get(
         "tasks",
         assigned_to_user_id=assigned_to_user_id,
@@ -745,6 +752,9 @@ async def list_tasks(
         matter_id=matter_id,
         created_since=created_since,
         updated_since=updated_since,
+        date_from=date_from,
+        date_to=date_to,
+        activity_tag=activity_tag,
     )
 
 
@@ -780,16 +790,18 @@ async def delete_task(id: str) -> Any:
 @mcp.tool()
 async def list_files(
     created_since: Optional[str] = None,
+    updated_since: Optional[str] = None,
     search_text: Optional[str] = None,
     account_id: Optional[str] = None,
     matter_id: Optional[str] = None,
     activity_id: Optional[str] = None,
     created_by_user_id: Optional[str] = None,
 ) -> Any:
-    """List PracticePanther files. Filter by account, matter, activity, creator, search text."""
+    """List PracticePanther files. Filter by account, matter, activity, creator, search text, or dates."""
     return await api_get(
         "files",
         created_since=created_since,
+        updated_since=updated_since,
         search_text=search_text,
         account_id=account_id,
         matter_id=matter_id,
@@ -958,21 +970,30 @@ async def delete_relationship(id: str) -> Any:
 
 
 @mcp.tool()
-async def get_company_custom_fields() -> Any:
+async def get_company_custom_fields(
+    created_since: Optional[str] = None,
+    updated_since: Optional[str] = None,
+) -> Any:
     """Get all PracticePanther custom fields for accounts/companies."""
-    return await api_get("customfields/company")
+    return await api_get("customfields/company", created_since=created_since, updated_since=updated_since)
 
 
 @mcp.tool()
-async def get_matter_custom_fields() -> Any:
+async def get_matter_custom_fields(
+    created_since: Optional[str] = None,
+    updated_since: Optional[str] = None,
+) -> Any:
     """Get all PracticePanther custom fields for matters."""
-    return await api_get("customfields/matter")
+    return await api_get("customfields/matter", created_since=created_since, updated_since=updated_since)
 
 
 @mcp.tool()
-async def get_contact_custom_fields() -> Any:
+async def get_contact_custom_fields(
+    created_since: Optional[str] = None,
+    updated_since: Optional[str] = None,
+) -> Any:
     """Get all PracticePanther custom fields for contacts."""
-    return await api_get("customfields/contact")
+    return await api_get("customfields/contact", created_since=created_since, updated_since=updated_since)
 
 
 @mcp.tool()
