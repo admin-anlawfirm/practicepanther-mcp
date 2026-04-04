@@ -173,6 +173,44 @@ async def api_request(
         return resp.json()
 
 
+# ---------------------------------------------------------------------------
+# OData query helpers
+# ---------------------------------------------------------------------------
+
+
+def build_odata_params(
+    *,
+    top: int | None = None,
+    skip: int | None = None,
+    odata_filter: str | None = None,
+    orderby: str | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Build a params dict merging regular filters with OData query options.
+
+    OData params supported by PracticePanther API v2:
+      $top     - max records to return (pagination)
+      $skip    - records to skip (pagination)
+      $filter  - OData filter expression, e.g. "contains(user/name, 'john')"
+      $orderby - sort expression, e.g. "date desc"
+    """
+    params: dict[str, Any] = {}
+    # Regular filter params (None values stripped)
+    for k, v in extra.items():
+        if v is not None:
+            params[k] = v
+    # OData system query options
+    if top is not None:
+        params["$top"] = top
+    if skip is not None:
+        params["$skip"] = skip
+    if odata_filter is not None:
+        params["$filter"] = odata_filter
+    if orderby is not None:
+        params["$orderby"] = orderby
+    return params
+
+
 # Convenience wrappers
 async def api_get(path: str, **params: Any) -> Any:
     return await api_request("GET", path, params=params if params else None)
