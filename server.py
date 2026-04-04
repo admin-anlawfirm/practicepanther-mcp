@@ -17,6 +17,7 @@ from mcp.server.auth.provider import construct_redirect_uri
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.shared.auth import OAuthClientInformationFull
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
@@ -34,6 +35,30 @@ ISSUER_URL = os.environ.get("MCP_ISSUER_URL", "https://practicepanther-mcp.onren
 
 oauth_store = OAuthStore()
 oauth_provider = PracticePantherOAuthProvider(oauth_store, ISSUER_URL)
+
+# Pre-register the Claude connector as an OAuth client at startup.
+# MCP_CLIENT_ID / MCP_CLIENT_SECRET are the credentials you enter
+# in Claude's connector settings — they are NOT the PP API credentials.
+_mcp_client_id = os.environ.get("MCP_CLIENT_ID", "").strip()
+_mcp_client_secret = os.environ.get("MCP_CLIENT_SECRET", "").strip()
+if _mcp_client_id and _mcp_client_secret:
+    from mcp_oauth_provider import CLIENT_TTL, ALLOWED_REDIRECT_PATTERNS
+    oauth_store.set(
+        f"mcp:client:{_mcp_client_id}",
+        OAuthClientInformationFull(
+            client_id=_mcp_client_id,
+            client_secret=_mcp_client_secret,
+            redirect_uris=[
+                "https://claude.ai/api/mcp/auth_callback",
+            ],
+            token_endpoint_auth_method="client_secret_post",
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            scope="mcp:tools",
+        ).model_dump_json(),
+        CLIENT_TTL,
+    )
+    logger.info("Pre-registered MCP OAuth client: %s", _mcp_client_id)
 
 mcp = FastMCP(
     "PracticePanther",
@@ -1324,6 +1349,11 @@ def _validate_env():
     missing = [v for v in required if not os.environ.get(v, "").strip()]
     if missing:
         raise SystemExit(f"Missing required environment variables: {', '.join(missing)}")
+    # MCP client credentials (for Claude connector OAuth)
+    mcp_id = os.environ.get("MCP_CLIENT_ID", "").strip()
+    mcp_secret = os.environ.get("MCP_CLIENT_SECRET", "").strip()
+    if bool(mcp_id) != bool(mcp_secret):
+        raise SystemExit("MCP_CLIENT_ID and MCP_CLIENT_SECRET must both be set or both be empty")
 
 
 if __name__ == "__main__":
