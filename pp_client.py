@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -16,31 +17,77 @@ BASE_URL = "https://app.practicepanther.com"
 API_V2 = f"{BASE_URL}/api/v2"
 
 # ---------------------------------------------------------------------------
+# Encryption helpers (Fernet AES-128-CBC + HMAC)
+# ---------------------------------------------------------------------------
+
+_fernet = None
+
+
+def _get_fernet():
+    """Return a Fernet cipher if TOKEN_ENCRYPTION_KEY is set, else None."""
+    global _fernet
+    if _fernet is None:
+        key = os.environ.get("TOKEN_ENCRYPTION_KEY", "").strip()
+        if key:
+            from cryptography.fernet import Fernet
+            _fernet = Fernet(key.encode())
+        else:
+            _fernet = False  # Sentinel: checked, not available
+    return _fernet if _fernet is not False else None
+
+
+def _encrypt(plaintext: str) -> str:
+    """Encrypt a string. Returns plaintext unchanged if no key configured."""
+    f = _get_fernet()
+    if f:
+        return f.encrypt(plaintext.encode()).decode()
+    return plaintext
+
+
+def _decrypt(ciphertext: str) -> str:
+    """Decrypt a string. Returns input unchanged if no key configured."""
+    f = _get_fernet()
+    if f:
+        return f.decrypt(ciphertext.encode()).decode()
+    return ciphertext
+
+
+# ---------------------------------------------------------------------------
 # Redis-backed token persistence
 # ---------------------------------------------------------------------------
 
 _redis_client = None
+_redis_warned = False
 REDIS_KEY = "pp_oauth_tokens"
 
 
 def _get_redis():
-    global _redis_client
+    global _redis_client, _redis_warned
     if _redis_client is None:
         redis_url = os.environ.get("REDIS_URL")
         if redis_url:
-            import redis
-            _redis_client = redis.from_url(redis_url, decode_responses=True)
-    return _redis_client
+            try:
+                import redis
+                _redis_client = redis.from_url(redis_url, decode_responses=True)
+                _redis_client.ping()
+            except Exception as e:
+                logger.warning("Redis unavailable, using in-memory token storage (tokens lost on restart): %s", e)
+                _redis_client = False  # Sentinel: don't retry
+                _redis_warned = True
+        elif not _redis_warned:
+            logger.info("REDIS_URL not set, using in-memory token storage")
+            _redis_warned = True
+    return _redis_client if _redis_client is not False else None
 
 
 def _save_tokens_to_redis(access_token: str, refresh_token: str, expires_at: float) -> None:
     r = _get_redis()
     if r:
-        r.set(REDIS_KEY, json.dumps({
+        r.set(REDIS_KEY, _encrypt(json.dumps({
             "access_token": access_token,
             "refresh_token": refresh_token,
             "expires_at": expires_at,
-        }))
+        })))
 
 
 def _load_tokens_from_redis() -> dict | None:
@@ -48,7 +95,7 @@ def _load_tokens_from_redis() -> dict | None:
     if r:
         data = r.get(REDIS_KEY)
         if data:
-            return json.loads(data)
+            return json.loads(_decrypt(data))
     return None
 
 

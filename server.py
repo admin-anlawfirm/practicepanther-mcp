@@ -1196,7 +1196,7 @@ async def list_users(
 # Starlette App (HTTP wrapper with OAuth callback)
 # ===========================================================================
 
-ALLOWED_EMAIL_DOMAIN = os.environ.get("ALLOWED_EMAIL_DOMAIN", "anlawfirm.com")
+ALLOWED_EMAIL_DOMAIN = os.environ.get("ALLOWED_EMAIL_DOMAIN", "anlawfirm.com").strip().lower()
 
 
 async def oauth_callback(request: Request):
@@ -1327,6 +1327,17 @@ def create_app():
 
     from contextlib import asynccontextmanager
 
+    from starlette.middleware import Middleware
+    from starlette.middleware.base import BaseHTTPMiddleware
+
+    class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            response = await call_next(request)
+            response.headers["X-Frame-Options"] = "DENY"
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+            return response
+
     @asynccontextmanager
     async def lifespan(app):
         async with mcp_app.router.lifespan_context(app):
@@ -1339,6 +1350,7 @@ def create_app():
             Mount("/", app=mcp_app),
         ],
         lifespan=lifespan,
+        middleware=[Middleware(SecurityHeadersMiddleware)],
     )
     return app
 
@@ -1354,6 +1366,11 @@ def _validate_env():
     mcp_secret = os.environ.get("MCP_CLIENT_SECRET", "").strip()
     if bool(mcp_id) != bool(mcp_secret):
         raise SystemExit("MCP_CLIENT_ID and MCP_CLIENT_SECRET must both be set or both be empty")
+    if not os.environ.get("TOKEN_ENCRYPTION_KEY", "").strip():
+        logger.warning(
+            "TOKEN_ENCRYPTION_KEY not set. Tokens will be stored unencrypted. "
+            "Generate one with: python3 -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        )
 
 
 if __name__ == "__main__":

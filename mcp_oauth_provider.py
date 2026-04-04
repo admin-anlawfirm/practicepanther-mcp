@@ -25,7 +25,7 @@ from mcp.server.auth.provider import (
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
 from oauth import get_authorize_url
-from pp_client import _get_redis
+from pp_client import _encrypt, _decrypt, _get_redis
 
 logger = logging.getLogger("pp-mcp")
 
@@ -55,24 +55,26 @@ class OAuthStore:
         self._mem: dict[str, tuple[str, float]] = {}  # key -> (value, expires_at)
 
     def set(self, key: str, value: str, ttl_seconds: int) -> None:
+        encrypted = _encrypt(value)
         r = _get_redis()
         if r:
-            r.setex(key, ttl_seconds, value)
+            r.setex(key, ttl_seconds, encrypted)
         else:
-            self._mem[key] = (value, time.time() + ttl_seconds)
+            self._mem[key] = (encrypted, time.time() + ttl_seconds)
 
     def get(self, key: str) -> str | None:
         r = _get_redis()
         if r:
-            return r.get(key)
+            data = r.get(key)
+            return _decrypt(data) if data else None
         entry = self._mem.get(key)
         if entry is None:
             return None
-        value, expires_at = entry
+        encrypted, expires_at = entry
         if time.time() >= expires_at:
             del self._mem[key]
             return None
-        return value
+        return _decrypt(encrypted)
 
     def delete(self, key: str) -> None:
         r = _get_redis()

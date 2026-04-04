@@ -16,6 +16,8 @@ services:
         sync: false
       - key: MCP_CLIENT_SECRET
         sync: false
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false
       - key: ALLOWED_EMAIL_DOMAIN
         value: "anlawfirm.com"
       - key: MCP_ALLOWED_HOSTS
