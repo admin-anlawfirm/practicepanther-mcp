@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger("pp-mcp")
 
 BASE_URL = "https://app.practicepanther.com"
 API_V2 = f"{BASE_URL}/api/v2"
@@ -160,8 +163,9 @@ async def api_request(
                 error_body = resp.text
             except Exception:
                 error_body = ""
+            logger.error("PP API %s /%s returned %s: %s", method, path, resp.status_code, error_body)
             raise RuntimeError(
-                f"PP API {method} /{path} returned {resp.status_code}: {error_body}"
+                f"PP API {method} /{path} returned {resp.status_code}"
             )
 
         if is_download:

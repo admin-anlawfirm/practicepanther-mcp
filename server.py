@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import secrets
 import time
 from typing import Any, Optional
+
+logger = logging.getLogger("pp-mcp")
 
 from mcp.server.auth.provider import construct_redirect_uri
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
@@ -30,10 +33,9 @@ ISSUER_URL = os.environ.get("MCP_ISSUER_URL", "https://practicepanther-mcp.onren
 
 oauth_store = OAuthStore()
 _static_tokens: set[str] = set()
-for _var in ("MCP_AUTH_TOKEN", "PP_CLIENT_SECRET"):
-    _val = os.environ.get(_var, "").strip()
-    if _val:
-        _static_tokens.add(_val)
+_mcp_auth_token = os.environ.get("MCP_AUTH_TOKEN", "").strip()
+if _mcp_auth_token:
+    _static_tokens.add(_mcp_auth_token)
 oauth_provider = PracticePantherOAuthProvider(oauth_store, ISSUER_URL, _static_tokens)
 
 mcp = FastMCP(
@@ -57,7 +59,9 @@ mcp = FastMCP(
     ),
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
-        allowed_hosts=["practicepanther-mcp.onrender.com", "localhost", "127.0.0.1"],
+        allowed_hosts=[h.strip() for h in os.environ.get(
+            "MCP_ALLOWED_HOSTS", "practicepanther-mcp.onrender.com"
+        ).split(",")],
     ),
 )
 
@@ -1170,7 +1174,7 @@ async def list_users(
 # Starlette App (HTTP wrapper with OAuth callback)
 # ===========================================================================
 
-ALLOWED_EMAIL_DOMAIN = "anlawfirm.com"
+ALLOWED_EMAIL_DOMAIN = os.environ.get("ALLOWED_EMAIL_DOMAIN", "anlawfirm.com")
 
 
 async def oauth_callback(request: Request):
@@ -1208,34 +1212,42 @@ async def oauth_callback(request: Request):
 
         # Verify the authenticated user belongs to the allowed domain
         from pp_client import token_store
+
+        def _clear_tokens():
+            token_store.access_token = None
+            token_store.refresh_token = None
+            token_store.expires_at = 0
+
+        def _deny_access(reason: str):
+            """Redirect or show denial page depending on flow type."""
+            _clear_tokens()
+            flow_json = oauth_store.get(f"mcp:authflow:{state}")
+            if flow_json:
+                flow = json.loads(flow_json)
+                oauth_store.delete(f"mcp:authflow:{state}")
+                return RedirectResponse(
+                    url=construct_redirect_uri(
+                        flow["redirect_uri"], error="access_denied",
+                        error_description=reason,
+                        state=flow["state"],
+                    ),
+                    status_code=302,
+                )
+            return HTMLResponse(
+                f"<h1>Access Denied</h1><p>{reason}</p>",
+                status_code=403,
+            )
+
         try:
             user = await api_get("users/me")
             email = (user.get("email") or "").lower()
             if not email.endswith(f"@{ALLOWED_EMAIL_DOMAIN}"):
-                token_store.access_token = None
-                token_store.refresh_token = None
-                token_store.expires_at = 0
-                # If MCP flow, redirect error to Claude
-                flow_json = oauth_store.get(f"mcp:authflow:{state}")
-                if flow_json:
-                    flow = json.loads(flow_json)
-                    oauth_store.delete(f"mcp:authflow:{state}")
-                    return RedirectResponse(
-                        url=construct_redirect_uri(
-                            flow["redirect_uri"], error="access_denied",
-                            error_description=f"Only @{ALLOWED_EMAIL_DOMAIN} users are authorized.",
-                            state=flow["state"],
-                        ),
-                        status_code=302,
-                    )
-                return HTMLResponse(
-                    f"<h1>Access Denied</h1>"
-                    f"<p>Only @{ALLOWED_EMAIL_DOMAIN} users are authorized. "
-                    f"Your email ({email}) is not permitted.</p>",
-                    status_code=403,
-                )
-        except Exception:
-            pass  # If user check fails, allow — token already stored
+                logger.warning("Domain check failed: %s is not @%s", email, ALLOWED_EMAIL_DOMAIN)
+                return _deny_access(f"Only @{ALLOWED_EMAIL_DOMAIN} users are authorized.")
+            logger.info("OAuth authorized: %s", email)
+        except Exception as exc:
+            logger.error("Domain verification failed (denying access): %s", exc)
+            return _deny_access("Unable to verify your identity. Please try again.")
 
         # Check if this is an MCP OAuth flow
         flow_json = oauth_store.get(f"mcp:authflow:{state}")
@@ -1276,7 +1288,11 @@ async def oauth_callback(request: Request):
             f"<p>Token expires in {result['expires_in']} seconds.</p>"
         )
     except Exception as e:
-        return HTMLResponse(f"<h1>Token Exchange Error</h1><p>{e}</p>", status_code=500)
+        logger.error("OAuth callback token exchange failed: %s", e)
+        return HTMLResponse(
+            "<h1>Token Exchange Error</h1><p>Authentication failed. Please try again.</p>",
+            status_code=500,
+        )
 
 
 async def health(request: Request):
@@ -1305,9 +1321,24 @@ def create_app():
     return app
 
 
+def _validate_env():
+    """Validate required environment variables are set at startup."""
+    required = ["PP_CLIENT_ID", "PP_CLIENT_SECRET", "PP_REDIRECT_URI"]
+    missing = [v for v in required if not os.environ.get(v, "").strip()]
+    if missing:
+        raise SystemExit(f"Missing required environment variables: {', '.join(missing)}")
+    if not os.environ.get("MCP_AUTH_TOKEN", "").strip():
+        logger.warning(
+            "MCP_AUTH_TOKEN is not set. Static token authentication is disabled. "
+            "Only OAuth-authenticated users will be able to access the server."
+        )
+
+
 if __name__ == "__main__":
     import uvicorn
 
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    _validate_env()
     port = int(os.environ.get("PORT", 8000))
     app = create_app()
     uvicorn.run(

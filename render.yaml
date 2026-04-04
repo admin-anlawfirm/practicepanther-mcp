@@ -12,6 +12,12 @@ services:
         sync: false
       - key: PP_REDIRECT_URI
         sync: false
+      - key: MCP_AUTH_TOKEN
+        sync: false
+      - key: ALLOWED_EMAIL_DOMAIN
+        value: "anlawfirm.com"
+      - key: MCP_ALLOWED_HOSTS
+        value: "practicepanther-mcp.onrender.com"
       - key: PYTHON_VERSION
         value: "3.12.0"
       - key: PYTHONDONTWRITEBYTECODE
