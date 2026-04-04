@@ -2,25 +2,39 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import secrets
+import time
 from typing import Any, Optional
 
+from mcp.server.auth.provider import construct_redirect_uri
+from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
-from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.routing import Mount, Route
-from starlette.types import ASGIApp, Receive, Scope, Send
 
+from mcp_oauth_provider import OAuthStore, PracticePantherOAuthProvider
 from oauth import exchange_code_for_tokens, get_authorize_url
 from pp_client import api_delete, api_get, api_post, api_put, api_request
 
 # ---------------------------------------------------------------------------
-# MCP Server
+# MCP Server with OAuth
 # ---------------------------------------------------------------------------
+
+ISSUER_URL = os.environ.get("MCP_ISSUER_URL", "https://practicepanther-mcp.onrender.com")
+
+oauth_store = OAuthStore()
+_static_tokens: set[str] = set()
+for _var in ("MCP_AUTH_TOKEN", "PP_CLIENT_SECRET"):
+    _val = os.environ.get(_var, "").strip()
+    if _val:
+        _static_tokens.add(_val)
+oauth_provider = PracticePantherOAuthProvider(oauth_store, ISSUER_URL, _static_tokens)
 
 mcp = FastMCP(
     "PracticePanther",
@@ -28,6 +42,18 @@ mcp = FastMCP(
         "MCP server for PracticePanther legal practice management. "
         "Call get_auth_url first to authenticate, then use any tool. "
         "All IDs are UUIDs. Dates are ISO 8601 UTC."
+    ),
+    auth_server_provider=oauth_provider,
+    auth=AuthSettings(
+        issuer_url=ISSUER_URL,
+        resource_server_url=ISSUER_URL,
+        client_registration_options=ClientRegistrationOptions(
+            enabled=True,
+            valid_scopes=["mcp:tools"],
+            default_scopes=["mcp:tools"],
+        ),
+        revocation_options=RevocationOptions(enabled=True),
+        required_scopes=["mcp:tools"],
     ),
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
@@ -1049,62 +1075,43 @@ async def list_users() -> Any:
 
 
 # ===========================================================================
-# Security Middleware
+# Starlette App (HTTP wrapper with OAuth callback)
 # ===========================================================================
 
 ALLOWED_EMAIL_DOMAIN = "anlawfirm.com"
 
 
-class BearerTokenMiddleware:
-    """Require a bearer token on /mcp routes. Open routes (/health, /oauth/callback) are exempt.
-
-    Accepts any of the following as a valid bearer token:
-      - MCP_AUTH_TOKEN (static token)
-      - PP_CLIENT_SECRET (PracticePanther client secret)
-    This allows the Claude connector to authenticate using the PP client secret directly.
-    """
-
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-        self.valid_tokens: set[str] = set()
-        for var in ("MCP_AUTH_TOKEN", "PP_CLIENT_SECRET"):
-            val = os.environ.get(var, "").strip()
-            if val:
-                self.valid_tokens.add(val)
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and scope["path"].startswith("/mcp"):
-            if not self.valid_tokens:
-                response = PlainTextResponse("Server auth not configured", status_code=503)
-                await response(scope, receive, send)
-                return
-            headers = dict(scope.get("headers", []))
-            auth = headers.get(b"authorization", b"").decode()
-            token = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
-            if token not in self.valid_tokens:
-                response = PlainTextResponse("Unauthorized", status_code=401)
-                await response(scope, receive, send)
-                return
-        await self.app(scope, receive, send)
-
-
-# ===========================================================================
-# Starlette App (HTTP wrapper with OAuth callback)
-# ===========================================================================
-
-
 async def oauth_callback(request: Request):
-    """Handle the OAuth callback from PracticePanther."""
+    """Handle the OAuth callback from PracticePanther.
+
+    Supports two flows:
+    1. MCP OAuth flow: state maps to a stored auth flow → redirect to Claude's callback
+    2. Legacy manual flow: no matching flow → show HTML success page
+    """
     code = request.query_params.get("code")
     error = request.query_params.get("error")
+    state = request.query_params.get("state", "")
 
     if error:
+        # If this is an MCP flow, redirect the error to Claude
+        flow_json = oauth_store.get(f"mcp:authflow:{state}")
+        if flow_json:
+            flow = json.loads(flow_json)
+            oauth_store.delete(f"mcp:authflow:{state}")
+            return RedirectResponse(
+                url=construct_redirect_uri(
+                    flow["redirect_uri"], error="access_denied",
+                    error_description=error, state=flow["state"],
+                ),
+                status_code=302,
+            )
         return HTMLResponse(f"<h1>Authorization Error</h1><p>{error}</p>", status_code=400)
 
     if not code:
         return HTMLResponse("<h1>Error</h1><p>No authorization code received.</p>", status_code=400)
 
     try:
+        # Exchange PP authorization code for PP tokens (stored globally)
         result = await exchange_code_for_tokens(code)
 
         # Verify the authenticated user belongs to the allowed domain
@@ -1113,10 +1120,22 @@ async def oauth_callback(request: Request):
             user = await api_get("users/me")
             email = (user.get("email") or "").lower()
             if not email.endswith(f"@{ALLOWED_EMAIL_DOMAIN}"):
-                # Clear tokens — unauthorized domain
                 token_store.access_token = None
                 token_store.refresh_token = None
                 token_store.expires_at = 0
+                # If MCP flow, redirect error to Claude
+                flow_json = oauth_store.get(f"mcp:authflow:{state}")
+                if flow_json:
+                    flow = json.loads(flow_json)
+                    oauth_store.delete(f"mcp:authflow:{state}")
+                    return RedirectResponse(
+                        url=construct_redirect_uri(
+                            flow["redirect_uri"], error="access_denied",
+                            error_description=f"Only @{ALLOWED_EMAIL_DOMAIN} users are authorized.",
+                            state=flow["state"],
+                        ),
+                        status_code=302,
+                    )
                 return HTMLResponse(
                     f"<h1>Access Denied</h1>"
                     f"<p>Only @{ALLOWED_EMAIL_DOMAIN} users are authorized. "
@@ -1126,6 +1145,39 @@ async def oauth_callback(request: Request):
         except Exception:
             pass  # If user check fails, allow — token already stored
 
+        # Check if this is an MCP OAuth flow
+        flow_json = oauth_store.get(f"mcp:authflow:{state}")
+        if flow_json:
+            flow = json.loads(flow_json)
+            oauth_store.delete(f"mcp:authflow:{state}")
+
+            # Generate an MCP authorization code for Claude
+            mcp_auth_code = secrets.token_urlsafe(32)
+            code_hash = hashlib.sha256(mcp_auth_code.encode()).hexdigest()
+
+            oauth_store.set(
+                f"mcp:authcode:{code_hash}",
+                json.dumps({
+                    "client_id": flow["client_id"],
+                    "code_challenge": flow["code_challenge"],
+                    "redirect_uri": flow["redirect_uri"],
+                    "redirect_uri_provided_explicitly": flow["redirect_uri_provided_explicitly"],
+                    "scopes": flow.get("scopes") or [],
+                    "resource": flow.get("resource"),
+                    "expires_at": time.time() + 300,
+                }),
+                300,
+            )
+
+            # Redirect to Claude's callback with the MCP auth code
+            return RedirectResponse(
+                url=construct_redirect_uri(
+                    flow["redirect_uri"], code=mcp_auth_code, state=flow["state"],
+                ),
+                status_code=302,
+            )
+
+        # Legacy manual flow — show HTML success page
         return HTMLResponse(
             "<h1>PracticePanther Connected!</h1>"
             "<p>You can close this window and return to Claude.</p>"
@@ -1147,7 +1199,6 @@ def create_app():
 
     @asynccontextmanager
     async def lifespan(app):
-        # Run the MCP app's lifespan so the task group is initialized
         async with mcp_app.router.lifespan_context(app):
             yield
 
@@ -1158,7 +1209,6 @@ def create_app():
             Mount("/", app=mcp_app),
         ],
         lifespan=lifespan,
-        middleware=[Middleware(BearerTokenMiddleware)],
     )
     return app
 
