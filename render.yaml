@@ -14,3 +14,9 @@ services:
         sync: false
       - key: PYTHON_VERSION
         value: "3.12.0"
+      - key: PYTHONDONTWRITEBYTECODE
+        value: "1"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: MALLOC_TRIM_THRESHOLD_
+        value: "65536"
