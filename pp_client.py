@@ -45,10 +45,15 @@ def _encrypt(plaintext: str) -> str:
 
 
 def _decrypt(ciphertext: str) -> str:
-    """Decrypt a string. Returns input unchanged if no key configured."""
+    """Decrypt a string. Returns input unchanged if no key configured.
+    Gracefully handles legacy unencrypted data (returns as-is)."""
     f = _get_fernet()
     if f:
-        return f.decrypt(ciphertext.encode()).decode()
+        try:
+            return f.decrypt(ciphertext.encode()).decode()
+        except Exception:
+            # Legacy data stored before encryption was enabled
+            return ciphertext
     return ciphertext
 
 
