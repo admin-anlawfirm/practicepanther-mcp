@@ -97,9 +97,16 @@ class PracticePantherOAuthProvider(OAuthAuthorizationServerProvider):
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         data = self.store.get(f"mcp:client:{client_id}")
-        if data is None:
-            return None
-        return OAuthClientInformationFull.model_validate_json(data)
+        if data is not None:
+            return OAuthClientInformationFull.model_validate_json(data)
+        # Auto-accept unregistered clients (Claude may skip /register)
+        return OAuthClientInformationFull(
+            client_id=client_id,
+            redirect_uris=["https://claude.ai/api/mcp/auth_callback"],
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            scope="mcp:tools",
+        )
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         self.store.set(
