@@ -32,11 +32,7 @@ from pp_client import api_delete, api_get, api_post, api_put, api_request, build
 ISSUER_URL = os.environ.get("MCP_ISSUER_URL", "https://practicepanther-mcp.onrender.com")
 
 oauth_store = OAuthStore()
-_static_tokens: set[str] = set()
-_mcp_auth_token = os.environ.get("MCP_AUTH_TOKEN", "").strip()
-if _mcp_auth_token:
-    _static_tokens.add(_mcp_auth_token)
-oauth_provider = PracticePantherOAuthProvider(oauth_store, ISSUER_URL, _static_tokens)
+oauth_provider = PracticePantherOAuthProvider(oauth_store, ISSUER_URL)
 
 mcp = FastMCP(
     "PracticePanther",
@@ -1327,11 +1323,6 @@ def _validate_env():
     missing = [v for v in required if not os.environ.get(v, "").strip()]
     if missing:
         raise SystemExit(f"Missing required environment variables: {', '.join(missing)}")
-    if not os.environ.get("MCP_AUTH_TOKEN", "").strip():
-        logger.warning(
-            "MCP_AUTH_TOKEN is not set. Static token authentication is disabled. "
-            "Only OAuth-authenticated users will be able to access the server."
-        )
 
 
 if __name__ == "__main__":

@@ -7,7 +7,9 @@ proxying authorization through PracticePanther's OAuth flow.
 
 import hashlib
 import json
+import logging
 import os
+import re
 import secrets
 import time
 from uuid import uuid4
@@ -24,6 +26,21 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
 from oauth import get_authorize_url
 from pp_client import _get_redis
+
+logger = logging.getLogger("pp-mcp")
+
+# Allowed redirect URI patterns for OAuth clients.
+# - claude.ai callback: for Claude.ai web connector
+# - localhost/127.0.0.1: for mcp-remote (Claude Code) OAuth flow
+ALLOWED_REDIRECT_PATTERNS = [
+    re.compile(r"^https://claude\.ai/api/mcp/auth_callback$"),
+    re.compile(r"^http://(localhost|127\.0\.0\.1)(:\d+)?/.*$"),
+]
+
+
+def _is_redirect_uri_allowed(uri: str) -> bool:
+    """Check if a redirect URI matches an allowed pattern."""
+    return any(p.match(uri) for p in ALLOWED_REDIRECT_PATTERNS)
 
 
 # ---------------------------------------------------------------------------
@@ -88,28 +105,25 @@ REFRESH_TOKEN_TTL = 30 * 86400 # 30 days
 class PracticePantherOAuthProvider(OAuthAuthorizationServerProvider):
     """MCP OAuth provider that proxies auth through PracticePanther OAuth."""
 
-    def __init__(self, store: OAuthStore, issuer_url: str, static_tokens: set[str]) -> None:
+    def __init__(self, store: OAuthStore, issuer_url: str) -> None:
         self.store = store
         self.issuer_url = issuer_url
-        self.static_tokens = static_tokens
 
     # -- Client registration --------------------------------------------------
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         data = self.store.get(f"mcp:client:{client_id}")
-        if data is not None:
-            return OAuthClientInformationFull.model_validate_json(data)
-        # Auto-accept unregistered clients (Claude may skip /register)
-        return OAuthClientInformationFull(
-            client_id=client_id,
-            redirect_uris=["https://claude.ai/api/mcp/auth_callback"],
-            token_endpoint_auth_method="none",
-            grant_types=["authorization_code", "refresh_token"],
-            response_types=["code"],
-            scope="mcp:tools",
-        )
+        if data is None:
+            return None  # Reject unregistered clients
+        return OAuthClientInformationFull.model_validate_json(data)
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        # Validate all redirect URIs against allowlist
+        for uri in client_info.redirect_uris:
+            if not _is_redirect_uri_allowed(str(uri)):
+                logger.warning("Client registration rejected: invalid redirect_uri %s", uri)
+                raise ValueError(f"Redirect URI not allowed: {uri}")
+        logger.info("Client registered: %s", client_info.client_id)
         self.store.set(
             f"mcp:client:{client_info.client_id}",
             client_info.model_dump_json(),
@@ -206,31 +220,21 @@ class PracticePantherOAuthProvider(OAuthAuthorizationServerProvider):
     # -- Access token ---------------------------------------------------------
 
     async def load_access_token(self, token: str) -> AccessToken | None:
-        # Check dynamic tokens first
         token_hash = _hash_token(token)
         data = self.store.get(f"mcp:access:{token_hash}")
-        if data is not None:
-            record = json.loads(data)
-            if time.time() >= record["expires_at"]:
-                self.store.delete(f"mcp:access:{token_hash}")
-                return None
-            return AccessToken(
-                token=token,
-                client_id=record["client_id"],
-                scopes=record["scopes"],
-                expires_at=int(record["expires_at"]),
-                resource=record.get("resource"),
-            )
-
-        # Fallback: static tokens (MCP_AUTH_TOKEN, PP_CLIENT_SECRET)
-        if token in self.static_tokens:
-            return AccessToken(
-                token=token,
-                client_id="static",
-                scopes=["mcp:tools"],
-            )
-
-        return None
+        if data is None:
+            return None
+        record = json.loads(data)
+        if time.time() >= record["expires_at"]:
+            self.store.delete(f"mcp:access:{token_hash}")
+            return None
+        return AccessToken(
+            token=token,
+            client_id=record["client_id"],
+            scopes=record["scopes"],
+            expires_at=int(record["expires_at"]),
+            resource=record.get("resource"),
+        )
 
     # -- Refresh token --------------------------------------------------------
 
