@@ -8,6 +8,7 @@ import logging
 import os
 import secrets
 import time
+from html import escape as html_escape
 from typing import Any, Optional
 
 logger = logging.getLogger("pp-mcp")
@@ -1197,7 +1198,7 @@ async def oauth_callback(request: Request):
                 ),
                 status_code=302,
             )
-        return HTMLResponse(f"<h1>Authorization Error</h1><p>{error}</p>", status_code=400)
+        return HTMLResponse(f"<h1>Authorization Error</h1><p>{html_escape(error)}</p>", status_code=400)
 
     if not code:
         return HTMLResponse("<h1>Error</h1><p>No authorization code received.</p>", status_code=400)
