@@ -814,22 +814,24 @@ async def list_tasks(
     matter_id: Optional[str] = None,
     created_since: Optional[str] = None,
     updated_since: Optional[str] = None,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
+    status: Optional[str] = None,
+    due_date_from: Optional[str] = None,
+    due_date_to: Optional[str] = None,
     activity_tag: Optional[str] = None,
     top: Optional[int] = None,
     skip: Optional[int] = None,
     odata_filter: Optional[str] = None,
     orderby: Optional[str] = None,
 ) -> Any:
-    """List PracticePanther tasks. Filter by assignment, account, matter, creation dates, due date range (date_from/date_to), or activity tag.
+    """List PracticePanther tasks. Filter by assignment, account, matter, status (NotCompleted/InProgress/Completed), due date range, or activity tag.
 
     Supports OData: top/skip for pagination, odata_filter for OData expressions, orderby for sorting."""
     params = build_odata_params(
         top=top, skip=skip, odata_filter=odata_filter, orderby=orderby,
         assigned_to_user_id=assigned_to_user_id, account_id=account_id, matter_id=matter_id,
         created_since=created_since, updated_since=updated_since,
-        date_from=date_from, date_to=date_to, activity_tag=activity_tag,
+        status=status, due_date_from=due_date_from, due_date_to=due_date_to,
+        activity_tag=activity_tag,
     )
     return await api_request("GET", "tasks", params=params or None)
 
