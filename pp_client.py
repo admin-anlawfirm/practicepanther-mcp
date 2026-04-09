@@ -280,5 +280,34 @@ async def api_put(path: str, id: str, body: dict[str, Any]) -> Any:
     return await api_request("PUT", path, params={"id": id}, json_body=body)
 
 
+# Fields the server manages — never echo them back on a merged PUT.
+_SERVER_MANAGED_FIELDS = frozenset({"id", "created_at", "updated_at"})
+
+
+async def api_put_merge(resource: str, id: str, partial: dict[str, Any]) -> Any:
+    """PATCH-semantics update for a PP resource that only exposes full-replace PUT.
+
+    Reads the current object, drops server-managed fields, merges the caller's
+    partial payload on top, and PUTs the merged object. Fields omitted from
+    ``partial`` are preserved from the server's current state, so callers can
+    update a single field without wiping the rest (e.g. without orphaning a
+    task from its matter by omitting matter_ref).
+
+    ``resource`` is used for both the GET (``{resource}/{id}``) and the PUT
+    (``{resource}?id=...``) — PP uses the same path for both in every case we
+    call this for.
+    """
+    existing = await api_request("GET", f"{resource}/{id}")
+    if not isinstance(existing, dict):
+        raise RuntimeError(
+            f"Cannot merge update for {resource}/{id}: GET did not return a single object"
+        )
+    merged: dict[str, Any] = {
+        k: v for k, v in existing.items() if k not in _SERVER_MANAGED_FIELDS
+    }
+    merged.update(partial)
+    return await api_put(resource, id, merged)
+
+
 async def api_delete(path: str, id: str) -> Any:
     return await api_request("DELETE", path, params={"id": id})

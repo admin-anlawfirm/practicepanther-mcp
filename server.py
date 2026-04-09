@@ -25,7 +25,7 @@ from starlette.routing import Mount, Route
 
 from mcp_oauth_provider import OAuthStore, PracticePantherOAuthProvider
 from oauth import exchange_code_for_tokens, get_authorize_url
-from pp_client import api_delete, api_get, api_post, api_put, api_request, build_odata_params
+from pp_client import api_delete, api_get, api_post, api_put_merge, api_request, build_odata_params
 
 # ---------------------------------------------------------------------------
 # MCP Server with OAuth
@@ -154,8 +154,8 @@ async def create_account(account: dict) -> Any:
 
 @mcp.tool()
 async def update_account(id: str, account: dict) -> Any:
-    """Update an existing PracticePanther account. Provide the account ID and fields to update."""
-    return await api_put("accounts", id, account)
+    """Partially update a PracticePanther account (PATCH semantics: omitted fields are preserved)."""
+    return await api_put_merge("accounts", id, account)
 
 
 @mcp.tool()
@@ -258,8 +258,8 @@ async def create_matter(matter: dict) -> Any:
 
 @mcp.tool()
 async def update_matter(id: str, matter: dict) -> Any:
-    """Update an existing PracticePanther matter."""
-    return await api_put("matters", id, matter)
+    """Partially update a PracticePanther matter (PATCH semantics: omitted fields are preserved)."""
+    return await api_put_merge("matters", id, matter)
 
 
 @mcp.tool()
@@ -314,8 +314,8 @@ async def create_time_entry(time_entry: dict) -> Any:
 
 @mcp.tool()
 async def update_time_entry(id: str, time_entry: dict) -> Any:
-    """Update an existing PracticePanther time entry."""
-    return await api_put("timeentries", id, time_entry)
+    """Partially update a PracticePanther time entry (PATCH semantics: omitted fields are preserved)."""
+    return await api_put_merge("timeentries", id, time_entry)
 
 
 @mcp.tool()
@@ -371,8 +371,8 @@ async def create_expense(expense: dict) -> Any:
 
 @mcp.tool()
 async def update_expense(id: str, expense: dict) -> Any:
-    """Update an existing PracticePanther expense."""
-    return await api_put("Expenses", id, expense)
+    """Partially update a PracticePanther expense (PATCH semantics: omitted fields are preserved)."""
+    return await api_put_merge("Expenses", id, expense)
 
 
 @mcp.tool()
@@ -419,8 +419,8 @@ async def create_expense_category(category: dict) -> Any:
 
 @mcp.tool()
 async def update_expense_category(id: str, category: dict) -> Any:
-    """Update an existing PracticePanther expense category."""
-    return await api_put("ExpenseCategories", id, category)
+    """Partially update a PracticePanther expense category (PATCH semantics: omitted fields are preserved)."""
+    return await api_put_merge("ExpenseCategories", id, category)
 
 
 @mcp.tool()
@@ -475,8 +475,8 @@ async def create_flat_fee(flat_fee: dict) -> Any:
 
 @mcp.tool()
 async def update_flat_fee(id: str, flat_fee: dict) -> Any:
-    """Update an existing PracticePanther flat fee."""
-    return await api_put("flatfees", id, flat_fee)
+    """Partially update a PracticePanther flat fee (PATCH semantics: omitted fields are preserved)."""
+    return await api_put_merge("flatfees", id, flat_fee)
 
 
 @mcp.tool()
@@ -619,8 +619,8 @@ async def create_call_log(call_log: dict) -> Any:
 
 @mcp.tool()
 async def update_call_log(id: str, call_log: dict) -> Any:
-    """Update an existing PracticePanther call log."""
-    return await api_put("calllogs", id, call_log)
+    """Partially update a PracticePanther call log (PATCH semantics: omitted fields are preserved)."""
+    return await api_put_merge("calllogs", id, call_log)
 
 
 @mcp.tool()
@@ -675,8 +675,8 @@ async def create_event(event: dict) -> Any:
 
 @mcp.tool()
 async def update_event(id: str, event: dict) -> Any:
-    """Update an existing PracticePanther event."""
-    return await api_put("events", id, event)
+    """Partially update a PracticePanther event (PATCH semantics: omitted fields are preserved)."""
+    return await api_put_merge("events", id, event)
 
 
 @mcp.tool()
@@ -731,8 +731,8 @@ async def create_note(note: dict) -> Any:
 
 @mcp.tool()
 async def update_note(id: str, note: dict) -> Any:
-    """Update an existing PracticePanther note."""
-    return await api_put("notes", id, note)
+    """Partially update a PracticePanther note (PATCH semantics: omitted fields are preserved)."""
+    return await api_put_merge("notes", id, note)
 
 
 @mcp.tool()
@@ -786,8 +786,8 @@ async def create_email(email: dict) -> Any:
 
 @mcp.tool()
 async def update_email(id: str, email: dict) -> Any:
-    """Update an existing PracticePanther email record."""
-    return await api_put("emails", id, email)
+    """Partially update a PracticePanther email record (PATCH semantics: omitted fields are preserved)."""
+    return await api_put_merge("emails", id, email)
 
 
 @mcp.tool()
@@ -829,7 +829,12 @@ async def create_message(message: dict) -> Any:
 
 @mcp.tool()
 async def update_message(message: dict) -> Any:
-    """Update an existing PracticePanther message. Include the id in the message dict."""
+    """Update an existing PracticePanther message. Include the id in the message dict.
+
+    WARNING: Unlike the other update_* tools, this is a full-replace PUT — the PP API does
+    not expose a single-message GET endpoint, so read-modify-write merging is not possible.
+    Callers must include every field they want preserved in the payload.
+    """
     return await api_request("PUT", "messages", json_body=message)
 
 
@@ -881,14 +886,25 @@ async def get_task(id: str) -> Any:
 
 @mcp.tool()
 async def create_task(task: dict) -> Any:
-    """Create a new PracticePanther task. Provide matter_ref, subject, due_date, assigned_to, etc."""
+    """Create a new PracticePanther task. Provide matter_ref, subject, due_date, assigned_to, etc.
+
+    If 'status' is omitted or null, it defaults to 'NotCompleted'. PracticePanther's web UI
+    cannot render a task with a null status, so the field is always persisted with a value.
+    """
+    if task.get("status") is None:
+        task = {**task, "status": "NotCompleted"}
     return await api_post("tasks", task)
 
 
 @mcp.tool()
 async def update_task(id: str, task: dict) -> Any:
-    """Update an existing PracticePanther task."""
-    return await api_put("tasks", id, task)
+    """Partially update a PracticePanther task (PATCH semantics).
+
+    Fields omitted from the 'task' payload are PRESERVED from the server's current state —
+    this tool reads the existing task and merges your partial payload on top before sending
+    the update. You can safely update {status} without wiping matter_ref, due_date, etc.
+    """
+    return await api_put_merge("tasks", id, task)
 
 
 @mcp.tool()
@@ -942,8 +958,8 @@ async def download_file(id: str) -> Any:
 
 @mcp.tool()
 async def update_file(id: str, file_data: dict) -> Any:
-    """Update PracticePanther file metadata."""
-    return await api_put("files", id, file_data)
+    """Partially update PracticePanther file metadata (PATCH semantics: omitted fields are preserved)."""
+    return await api_put_merge("files", id, file_data)
 
 
 @mcp.tool()
@@ -990,8 +1006,8 @@ async def create_item(item: dict) -> Any:
 
 @mcp.tool()
 async def update_item(id: str, item: dict) -> Any:
-    """Update an existing PracticePanther billing rate item."""
-    return await api_put("Items", id, item)
+    """Partially update a PracticePanther billing rate item (PATCH semantics: omitted fields are preserved)."""
+    return await api_put_merge("Items", id, item)
 
 
 @mcp.tool()
@@ -1038,8 +1054,8 @@ async def create_bank_account(bank_account: dict) -> Any:
 
 @mcp.tool()
 async def update_bank_account(id: str, bank_account: dict) -> Any:
-    """Update an existing PracticePanther bank account."""
-    return await api_put("bankaccounts", id, bank_account)
+    """Partially update a PracticePanther bank account (PATCH semantics: omitted fields are preserved)."""
+    return await api_put_merge("bankaccounts", id, bank_account)
 
 
 @mcp.tool()
@@ -1090,8 +1106,8 @@ async def create_relationship(relationship: dict) -> Any:
 
 @mcp.tool()
 async def update_relationship(id: str, relationship: dict) -> Any:
-    """Update an existing PracticePanther relationship."""
-    return await api_put("relationships", id, relationship)
+    """Partially update a PracticePanther relationship (PATCH semantics: omitted fields are preserved)."""
+    return await api_put_merge("relationships", id, relationship)
 
 
 @mcp.tool()
