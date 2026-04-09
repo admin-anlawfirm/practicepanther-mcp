@@ -260,14 +260,20 @@ class PracticePantherOAuthProvider(OAuthAuthorizationServerProvider):
         refresh_token: RefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
-        # Revoke old refresh token
-        old_hash = _hash_token(refresh_token.token)
-        self.store.delete(f"mcp:refresh:{old_hash}")
-
-        # Issue new tokens
-        new_access = secrets.token_urlsafe(32)
-        new_refresh = secrets.token_urlsafe(32)
+        # Do NOT rotate the refresh token. Rotation causes a race condition
+        # when the client fires multiple concurrent refresh requests (common
+        # with MCP clients that parallelize tool calls or recover from a
+        # cold-started server): the first request would succeed and delete
+        # the old token, and all subsequent concurrent requests would get
+        # 400 Bad Request, causing the client to drop the connection and
+        # force the user to manually reconnect.
+        #
+        # Instead, reuse the same refresh token and just issue a fresh
+        # access token. Concurrent refreshes all succeed with the same
+        # refresh token, and we extend the refresh token's TTL as a sliding
+        # window so active users don't get logged out after 30 days.
         use_scopes = scopes if scopes else refresh_token.scopes
+        new_access = secrets.token_urlsafe(32)
         expires_at = time.time() + ACCESS_TOKEN_TTL
 
         self.store.set(
@@ -279,8 +285,9 @@ class PracticePantherOAuthProvider(OAuthAuthorizationServerProvider):
             }),
             ACCESS_TOKEN_TTL,
         )
+        # Sliding-window extension of the refresh token TTL.
         self.store.set(
-            f"mcp:refresh:{_hash_token(new_refresh)}",
+            f"mcp:refresh:{_hash_token(refresh_token.token)}",
             json.dumps({
                 "client_id": client.client_id,
                 "scopes": use_scopes,
@@ -292,7 +299,7 @@ class PracticePantherOAuthProvider(OAuthAuthorizationServerProvider):
             access_token=new_access,
             token_type="Bearer",
             expires_in=ACCESS_TOKEN_TTL,
-            refresh_token=new_refresh,
+            refresh_token=refresh_token.token,
             scope=" ".join(use_scopes) if use_scopes else None,
         )
 
