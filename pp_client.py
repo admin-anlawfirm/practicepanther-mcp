@@ -161,7 +161,9 @@ async def refresh_access_token() -> None:
                 "client_secret": os.environ["PP_CLIENT_SECRET"],
             },
         )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            logger.error("PP /oauth/token (refresh_token) returned %s: %s", resp.status_code, resp.text)
+            raise RuntimeError(f"PP /oauth/token returned {resp.status_code}: {resp.text}")
         data = resp.json()
         token_store.set_tokens(
             data["access_token"],

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from urllib.parse import urlencode
 
 import httpx
 
 from pp_client import BASE_URL, token_store
+
+logger = logging.getLogger("pp-mcp")
 
 AUTHORIZE_URL = f"{BASE_URL}/oauth/authorize"
 TOKEN_URL = f"{BASE_URL}/oauth/token"
@@ -37,7 +40,9 @@ async def exchange_code_for_tokens(code: str) -> dict:
                 "redirect_uri": os.environ["PP_REDIRECT_URI"],
             },
         )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            logger.error("PP /oauth/token (authorization_code) returned %s: %s", resp.status_code, resp.text)
+            raise RuntimeError(f"PP /oauth/token returned {resp.status_code}: {resp.text}")
         data = resp.json()
 
         token_store.set_tokens(
