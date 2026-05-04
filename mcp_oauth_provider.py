@@ -83,6 +83,33 @@ class OAuthStore:
         else:
             self._mem.pop(key, None)
 
+    def delete_by_prefix(self, prefix: str) -> int:
+        """Delete all keys starting with ``prefix``. Returns count deleted."""
+        r = _get_redis()
+        count = 0
+        if r:
+            for key in r.scan_iter(match=f"{prefix}*", count=100):
+                r.delete(key)
+                count += 1
+        else:
+            for key in [k for k in self._mem.keys() if k.startswith(prefix)]:
+                del self._mem[key]
+                count += 1
+        return count
+
+
+def invalidate_all_pp_sessions(store: "OAuthStore") -> None:
+    """Delete all MCP access + refresh tokens. Called when PP revokes auth so
+    that Claude cannot keep using its still-valid MCP refresh token to issue
+    new MCP access tokens that have no working PP credentials behind them.
+    The next MCP request will 401, prompting a fresh OAuth flow."""
+    a = store.delete_by_prefix("mcp:access:")
+    rt = store.delete_by_prefix("mcp:refresh:")
+    logger.warning(
+        "PP auth expired — invalidated %d MCP access tokens and %d MCP refresh tokens",
+        a, rt,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Helpers

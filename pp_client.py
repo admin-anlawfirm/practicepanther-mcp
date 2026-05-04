@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
 import os
 import time
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -15,6 +16,17 @@ logger = logging.getLogger("pp-mcp")
 
 BASE_URL = "https://app.practicepanther.com"
 API_V2 = f"{BASE_URL}/api/v2"
+
+
+class PPAuthExpired(RuntimeError):
+    """PracticePanther refused our credentials and they cannot be refreshed.
+    The user must re-authorize via the OAuth flow."""
+
+
+# Hook invoked when PP auth permanently fails. Set by server.py at startup
+# so that MCP-layer tokens can be invalidated alongside PP-layer tokens,
+# forcing Claude to start a fresh OAuth flow.
+on_pp_auth_expired: Callable[[], None] | None = None
 
 # ---------------------------------------------------------------------------
 # Encryption helpers (Fernet AES-128-CBC + HMAC)
@@ -46,15 +58,29 @@ def _encrypt(plaintext: str) -> str:
 
 def _decrypt(ciphertext: str) -> str:
     """Decrypt a string. Returns input unchanged if no key configured.
-    Gracefully handles legacy unencrypted data (returns as-is)."""
+
+    Gracefully handles legacy unencrypted data: if the input does NOT look
+    like a Fernet token (which always starts with 'gAAAAA' base64-encoded),
+    we treat it as plaintext from before encryption was enabled.
+
+    If the input DOES look like Fernet but decryption fails, that means key
+    rotation or corruption — raise loudly. Silently returning ciphertext as
+    "plaintext" causes downstream API errors hours later that look like auth
+    bugs but are really key/data drift."""
     f = _get_fernet()
-    if f:
-        try:
-            return f.decrypt(ciphertext.encode()).decode()
-        except Exception:
-            # Legacy data stored before encryption was enabled
-            return ciphertext
-    return ciphertext
+    if not f:
+        return ciphertext
+    if not ciphertext.startswith("gAAAAA"):
+        # Legacy unencrypted data stored before encryption was enabled
+        return ciphertext
+    try:
+        return f.decrypt(ciphertext.encode()).decode()
+    except Exception as e:
+        logger.error(
+            "Token decryption failed — TOKEN_ENCRYPTION_KEY may have rotated "
+            "or stored data is corrupted. Re-authorize via the OAuth flow."
+        )
+        raise RuntimeError("Token decryption failed") from e
 
 
 # ---------------------------------------------------------------------------
@@ -67,18 +93,36 @@ REDIS_KEY = "pp_oauth_tokens"
 
 
 def _get_redis():
+    """Return a Redis client if REDIS_URL is set and reachable.
+
+    Behavior:
+    - REDIS_URL set + reachable → use Redis.
+    - REDIS_URL set + unreachable → raise. Falling back to in-memory in
+      production silently loses tokens on the next restart and produces the
+      "auth error after idle" disconnect symptom. Set ALLOW_INMEMORY_TOKENS=1
+      to opt in to the legacy fallback for dev/test.
+    - REDIS_URL unset → in-memory (local dev default).
+    """
     global _redis_client, _redis_warned
     if _redis_client is None:
         redis_url = os.environ.get("REDIS_URL")
+        allow_fallback = os.environ.get("ALLOW_INMEMORY_TOKENS", "").strip().lower() in ("1", "true", "yes")
         if redis_url:
             try:
                 import redis
                 _redis_client = redis.from_url(redis_url, decode_responses=True)
                 _redis_client.ping()
             except Exception as e:
-                logger.warning("Redis unavailable, using in-memory token storage (tokens lost on restart): %s", e)
-                _redis_client = False  # Sentinel: don't retry
-                _redis_warned = True
+                if allow_fallback:
+                    logger.warning("Redis unavailable, falling back to in-memory token storage (ALLOW_INMEMORY_TOKENS set): %s", e)
+                    _redis_client = False
+                    _redis_warned = True
+                else:
+                    logger.error("REDIS_URL is set but Redis is unreachable: %s", e)
+                    raise RuntimeError(
+                        f"Redis unreachable at REDIS_URL: {e}. "
+                        "Set ALLOW_INMEMORY_TOKENS=1 to allow in-memory fallback (dev only)."
+                    ) from e
         elif not _redis_warned:
             logger.info("REDIS_URL not set, using in-memory token storage")
             _redis_warned = True
@@ -102,6 +146,12 @@ def _load_tokens_from_redis() -> dict | None:
         if data:
             return json.loads(_decrypt(data))
     return None
+
+
+def _delete_tokens_from_redis() -> None:
+    r = _get_redis()
+    if r:
+        r.delete(REDIS_KEY)
 
 
 # ---------------------------------------------------------------------------
@@ -142,28 +192,81 @@ class TokenStore:
         self._ensure_loaded()
         return self.access_token is not None
 
+    def clear(self) -> None:
+        """Wipe tokens from memory and Redis. Used when PP rejects credentials."""
+        self.access_token = None
+        self.refresh_token = None
+        self.expires_at = 0
+        self._loaded = True  # Don't reload from Redis after clearing
+        _delete_tokens_from_redis()
+
 
 token_store = TokenStore()
 
+# Serializes concurrent refreshes so multiple in-flight tool calls don't all
+# POST to /oauth/token simultaneously.
+_refresh_lock = asyncio.Lock()
+
+
+def _is_permanent_auth_failure(status: int, body: str) -> bool:
+    """PP returned a status/body that means the refresh token is dead and a
+    retry won't help — the user must re-auth."""
+    if status == 401:
+        return True
+    if status == 400 and ("invalid_grant" in body or "invalid_client" in body):
+        return True
+    return False
+
+
+def _signal_pp_auth_expired() -> None:
+    """Tell the MCP layer to drop its tokens too, so Claude prompts re-auth."""
+    token_store.clear()
+    cb = on_pp_auth_expired
+    if cb:
+        try:
+            cb()
+        except Exception as e:
+            logger.error("on_pp_auth_expired callback raised: %s", e)
+
 
 async def refresh_access_token() -> None:
-    """Refresh the access token using the stored refresh token."""
-    if not token_store.refresh_token:
-        raise RuntimeError("No refresh token available. Please re-authorize via get_auth_url.")
+    """Refresh the access token using the stored refresh token.
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{BASE_URL}/oauth/token",
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": token_store.refresh_token,
-                "client_id": os.environ["PP_CLIENT_ID"],
-                "client_secret": os.environ["PP_CLIENT_SECRET"],
-            },
-        )
+    Serialized via _refresh_lock so concurrent callers don't race on the PP
+    /oauth/token endpoint. Inside the lock we re-check expiry — if another
+    coroutine already refreshed while we were waiting, we return immediately.
+    """
+    async with _refresh_lock:
+        # Another coroutine may have refreshed while we waited for the lock.
+        if not token_store.is_expired and token_store.is_authenticated:
+            return
+
+        if not token_store.refresh_token:
+            raise PPAuthExpired(
+                "No refresh token available. Please re-authorize via get_auth_url."
+            )
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{BASE_URL}/oauth/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": token_store.refresh_token,
+                    "client_id": os.environ["PP_CLIENT_ID"],
+                    "client_secret": os.environ["PP_CLIENT_SECRET"],
+                },
+            )
+
         if resp.status_code >= 400:
-            logger.error("PP /oauth/token (refresh_token) returned %s: %s", resp.status_code, resp.text)
-            raise RuntimeError(f"PP /oauth/token returned {resp.status_code}: {resp.text}")
+            body = resp.text
+            logger.error("PP /oauth/token (refresh_token) returned %s: %s", resp.status_code, body)
+            if _is_permanent_auth_failure(resp.status_code, body):
+                _signal_pp_auth_expired()
+                raise PPAuthExpired(
+                    f"PP refresh token rejected ({resp.status_code}). User must re-authorize."
+                )
+            raise RuntimeError(f"PP /oauth/token returned {resp.status_code}: {body}")
+
         data = resp.json()
         token_store.set_tokens(
             data["access_token"],
@@ -175,11 +278,13 @@ async def refresh_access_token() -> None:
 async def _ensure_auth() -> str:
     """Return a valid access token, refreshing if needed."""
     if not token_store.is_authenticated:
-        raise RuntimeError(
+        raise PPAuthExpired(
             "Not authenticated. Call get_auth_url first, then visit the URL to authorize."
         )
     if token_store.is_expired:
         await refresh_access_token()
+        if not token_store.is_authenticated:
+            raise PPAuthExpired("PP credentials cleared after failed refresh.")
     return token_store.access_token  # type: ignore[return-value]
 
 
@@ -193,42 +298,62 @@ async def api_request(
     files: Any = None,
     is_download: bool = False,
 ) -> Any:
-    """Make an authenticated request to the PracticePanther API."""
-    access_token = await _ensure_auth()
+    """Make an authenticated request to the PracticePanther API.
 
+    On 401, force-refresh the access token and retry once. PP can revoke a
+    still-unexpired access token server-side (user revokes from PP UI,
+    password change, admin de-auth) — without this retry, the next tool
+    call after such a revocation fails immediately with no recovery path.
+    """
     # Clean None values from params
     if params:
         params = {k: v for k, v in params.items() if v is not None}
 
-    headers = {"Authorization": f"Bearer {access_token}"}
+    url = f"{API_V2}/{path}" if not path.startswith("http") else path
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.request(
-            method,
-            f"{API_V2}/{path}" if not path.startswith("http") else path,
-            params=params,
-            json=json_body,
-            data=data,
-            files=files,
-            headers=headers,
-        )
-        if resp.status_code >= 400:
-            try:
-                error_body = resp.text
-            except Exception:
-                error_body = ""
-            logger.error("PP API %s /%s returned %s: %s", method, path, resp.status_code, error_body)
-            raise RuntimeError(
-                f"PP API {method} /{path} returned {resp.status_code}"
+    async def _do_request() -> httpx.Response:
+        access_token = await _ensure_auth()
+        headers = {"Authorization": f"Bearer {access_token}"}
+        async with httpx.AsyncClient(timeout=60) as client:
+            return await client.request(
+                method, url,
+                params=params, json=json_body, data=data, files=files,
+                headers=headers,
             )
 
-        if is_download:
-            return {"content": resp.content.hex(), "content_type": resp.headers.get("content-type")}
+    resp = await _do_request()
 
-        if resp.status_code == 204 or not resp.content:
-            return {"status": "success"}
+    if resp.status_code == 401:
+        logger.info("PP API %s /%s got 401, forcing refresh and retrying once", method, path)
+        token_store.expires_at = 0  # force refresh on the retry
+        try:
+            resp = await _do_request()
+        except PPAuthExpired:
+            raise
+        if resp.status_code == 401:
+            logger.error("PP API %s /%s still 401 after refresh — credentials revoked", method, path)
+            _signal_pp_auth_expired()
+            raise PPAuthExpired(
+                f"PP API {method} /{path} returned 401 after refresh. User must re-authorize."
+            )
 
-        return resp.json()
+    if resp.status_code >= 400:
+        try:
+            error_body = resp.text
+        except Exception:
+            error_body = ""
+        logger.error("PP API %s /%s returned %s: %s", method, path, resp.status_code, error_body)
+        raise RuntimeError(
+            f"PP API {method} /{path} returned {resp.status_code}"
+        )
+
+    if is_download:
+        return {"content": resp.content.hex(), "content_type": resp.headers.get("content-type")}
+
+    if resp.status_code == 204 or not resp.content:
+        return {"status": "success"}
+
+    return resp.json()
 
 
 # ---------------------------------------------------------------------------

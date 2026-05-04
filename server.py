@@ -23,8 +23,9 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.routing import Mount, Route
 
-from mcp_oauth_provider import OAuthStore, PracticePantherOAuthProvider
+from mcp_oauth_provider import OAuthStore, PracticePantherOAuthProvider, invalidate_all_pp_sessions
 from oauth import exchange_code_for_tokens, get_authorize_url
+import pp_client
 from pp_client import api_delete, api_get, api_post, api_put_merge, api_request, build_odata_params
 
 # ---------------------------------------------------------------------------
@@ -35,6 +36,10 @@ ISSUER_URL = os.environ.get("MCP_ISSUER_URL", "https://practicepanther-mcp.onren
 
 oauth_store = OAuthStore()
 oauth_provider = PracticePantherOAuthProvider(oauth_store, ISSUER_URL)
+
+# When PP rejects our refresh token, drop the MCP-layer tokens too so Claude
+# starts a fresh OAuth flow instead of looping on a dead session.
+pp_client.on_pp_auth_expired = lambda: invalidate_all_pp_sessions(oauth_store)
 
 # Pre-register the Claude connector as an OAuth client at startup.
 # MCP_CLIENT_ID / MCP_CLIENT_SECRET are the credentials you enter
